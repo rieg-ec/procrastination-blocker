@@ -14,7 +14,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var timer: Timer?
     private var startingSession = false
     private var workFocusInstalled: Bool?
-    private var wakeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         settingsController = WebsiteSettingsWindowController(store: websiteStore)
@@ -29,32 +28,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
         refreshWorkFocusStatus()
 
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.tick()
-            }
-        }
+        let timer = Timer(
+            timeInterval: 1,
+            target: self,
+            selector: #selector(timerFired(_:)),
+            userInfo: nil,
+            repeats: true
+        )
         timer.tolerance = 0.1
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
 
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.reloadSession()
-                self?.rebuildMenu()
-            }
-        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(workspaceDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
-        if let wakeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
-        }
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -92,6 +87,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             updateStatusButton()
         }
+    }
+
+    @objc private func timerFired(_ timer: Timer) {
+        tick()
+    }
+
+    @objc private func workspaceDidWake(_ notification: Notification) {
+        reloadSession()
+        rebuildMenu()
     }
 
     private func reloadSession() {
@@ -209,16 +213,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func addWorkFocusMenuItem() {
-        switch workFocusInstalled {
-        case true:
+        if workFocusInstalled == true {
             let item = menuItem("Work Focus Shortcut Found", enabled: false)
             item.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
             menu.addItem(item)
-        case false:
+        } else if workFocusInstalled == false {
             let item = menuItem("Set Up Work Focus…", action: #selector(showWorkFocusSetup))
             item.image = NSImage(systemSymbolName: "moon", accessibilityDescription: nil)
             menu.addItem(item)
-        case nil:
+        } else {
             menu.addItem(menuItem("Checking Work Focus Shortcut…", enabled: false))
         }
     }
@@ -231,14 +234,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .enabled:
             item = menuItem("Start at Login", action: #selector(toggleLogin))
             item.state = .on
-        case .notRegistered:
+        case .notRegistered, .notFound:
             item = menuItem("Start at Login", action: #selector(toggleLogin))
             item.state = .off
         case .requiresApproval:
             item = menuItem("Start at Login (Approval Required)…", action: #selector(toggleLogin))
             item.state = .mixed
-        case .notFound:
-            item = menuItem("Start at Login Unavailable", enabled: false)
         @unknown default:
             item = menuItem("Start at Login Unavailable", enabled: false)
         }
@@ -358,12 +359,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch service.status {
             case .enabled:
                 try service.unregister()
-            case .notRegistered:
+            case .notRegistered, .notFound:
                 try service.register()
             case .requiresApproval:
                 SMAppService.openSystemSettingsLoginItems()
-            case .notFound:
-                throw LoginItemError.appNotInstalled
             @unknown default:
                 throw LoginItemError.unknownStatus
             }
@@ -441,13 +440,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 private enum LoginItemError: LocalizedError {
-    case appNotInstalled
     case unknownStatus
 
     var errorDescription: String? {
         switch self {
-        case .appNotInstalled:
-            return "Install Procrastination Blocker in /Applications before enabling Start at Login."
         case .unknownStatus:
             return "macOS returned an unknown Start at Login status."
         }
